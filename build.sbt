@@ -214,5 +214,5 @@ lazy val root = project
     .settings(resolvers ++= appResolvers)
     .settings(libraryDependencies ++= coreDependencies)
     .settings(EclipseKeys.skipParents in ThisBuild := false)
-    .aggregate(api, nlp, csv, dfs, social, nosql, ml, web, tuktudb)
-    .dependsOn(api, nlp, csv, dfs, social, nosql, ml, web, tuktudb)
+    .aggregate(api)//, nlp, csv, dfs, social, nosql, ml, web, tuktudb)
+    .dependsOn(api)//, nlp, csv, dfs, social, nosql, ml, web, tuktudb)

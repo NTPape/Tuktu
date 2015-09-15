@@ -55,7 +55,7 @@ class DummyGenerator(resultName: String, processors: List[Enumeratee[DataPacket,
             cleanup
         }
         case msg: String => {
-            channel.push(new DataPacket(List(Map(resultName -> message))))
+            channel.push(new DataPacket(Map(resultName -> message)))
             // See if we need to stop
             maxAmount match {
                 case Some(amnt) => {
@@ -109,7 +109,7 @@ class RandomGenerator(resultName: String, processors: List[Enumeratee[DataPacket
         case one: Int => {
             val fut = randomActor ? one
             fut.onSuccess {
-                case num: Int => channel.push(new DataPacket(List(Map(resultName -> num))))
+                case num: Int => channel.push(new DataPacket(List(new Datum(Map(resultName -> num)))))
             }
         }
         case x => println("Dummy generator got unexpected packet " + x + "\r\n")
@@ -134,7 +134,7 @@ class ListGenerator(resultName: String, processors: List[Enumeratee[DataPacket, 
         }
         case sp: StopPacket => cleanup
         case num: Int => {
-            channel.push(new DataPacket(List(Map(resultName -> vals(num)))))
+            channel.push(new DataPacket(List(new Datum(Map(resultName -> vals(num))))))
             // See if we're done or not
             if (num < vals.size - 1) self ! (num + 1)
             else self ! new StopPacket

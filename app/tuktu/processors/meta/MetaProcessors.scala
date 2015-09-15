@@ -22,25 +22,19 @@ import akka.routing.Broadcast
 /**
  * Invokes a new generator
  */
-class GeneratorConfigProcessor(resultName: String) extends BaseProcessor(resultName) {
+class GeneratorConfigProcessor(config: JsObject) extends BaseProcessor(config) {
     implicit val timeout = Timeout(Cache.getAs[Int]("timeout").getOrElse(5) seconds)
 
-    var name = ""
-    var fieldsToAdd: Option[List[JsObject]] = _
+    // Get the name of the config file
+    val name = (config \ "name").as[String]
+    // See if we need to populate the config file
+    val fieldsToAdd = (config \ "add_fields").asOpt[List[JsObject]]
 
-    override def initialize(config: JsObject) {
-        // Get the name of the config file
-        name = (config \ "name").as[String]
-
-        // See if we need to populate the config file
-        fieldsToAdd = (config \ "add_fields").asOpt[List[JsObject]]
-    }
-
-    override def processor(): Enumeratee[DataPacket, DataPacket] = Enumeratee.mapM(data => Future {
+    override def process: Enumeratee[DataPacket, DataPacket] = Enumeratee.mapM(data => Future {
         // See if we need to add the config or not
         fieldsToAdd match {
             case Some(fields) => {
-                data.data.foreach(datum => {
+                data.foreach(datum => {
                     // Resolve name with potential variables
                     val nextName = utils.evaluateTuktuString(name, datum)
 
@@ -88,7 +82,7 @@ class GeneratorConfigProcessor(resultName: String) extends BaseProcessor(resultN
                 // Invoke the new generator, as-is, but see if the name depends on variables
                 if (utils.containsTuktuStringVariable(name)) {
                     // Name contains a variable, so we must populate it for each datum
-                    data.data.foreach(datum => {
+                    data.foreach(datum => {
                         Akka.system.actorSelection("user/TuktuDispatcher") !
                             new controllers.DispatchRequest(utils.evaluateTuktuString(name, datum), None, false, false, false, None)
                     })
@@ -133,60 +127,57 @@ class SyncStreamForwarder() extends Actor with ActorLogging {
 /**
  * Invokes a new generator
  */
-class GeneratorStreamProcessor(resultName: String) extends BaseProcessor(resultName) {
+class GeneratorStreamProcessor(config: JsObject) extends BaseProcessor(config) {
     implicit val timeout = Timeout(Cache.getAs[Int]("timeout").getOrElse(5) seconds)
 
     val forwarder = Akka.system.actorOf(Props[SyncStreamForwarder])
-    var sync: Boolean = false
 
-    override def initialize(config: JsObject) {
-        // Get the name of the config file
-        val nextName = (config \ "name").as[String]
-        // Node to execute on
-        val nodes = (config \ "node").asOpt[String]
-        // Get the processors to send data into
-        val next = (config \ "next").as[List[String]]
-        // Get the actual config, being a list of processors
-        val processors = (config \ "processors").as[List[JsObject]]
+    // Get the name of the config file
+    val nextName = (config \ "name").as[String]
+    // Node to execute on
+    val nodes = (config \ "node").asOpt[String]
+    // Get the processors to send data into
+    val next = (config \ "next").as[List[String]]
+    // Get the actual config, being a list of processors
+    val processors = (config \ "processors").as[List[JsObject]]
 
-        sync = (config \ "sync").asOpt[Boolean].getOrElse(false)
+    val sync = (config \ "sync").asOpt[Boolean].getOrElse(false)
 
-        // Manipulate config and set up the remote actor
-        val customConfig = Json.obj(
-            "generators" -> List((Json.obj(
-                "name" -> {
-                    sync match {
-                        case true  => "tuktu.generators.SyncStreamGenerator"
-                        case false => "tuktu.generators.AsyncStreamGenerator"
-                    }
-                },
-                "result" -> "",
-                "config" -> Json.obj(),
-                "next" -> next) ++
-                (nodes match {
-                    case Some(n) => Json.obj("nodes" -> Json.obj(
-                        "type" -> "SingleNode",
-                        "nodes" -> n,
-                        "instances" -> 1))
-                    case None => Json.obj()
-                }))),
-            "processors" -> processors)
+    // Manipulate config and set up the remote actor
+    val customConfig = Json.obj(
+        "generators" -> List((Json.obj(
+            "name" -> {
+                sync match {
+                    case true  => "tuktu.generators.SyncStreamGenerator"
+                    case false => "tuktu.generators.AsyncStreamGenerator"
+                }
+            },
+            "result" -> "",
+            "config" -> Json.obj(),
+            "next" -> next) ++
+            (nodes match {
+                case Some(n) => Json.obj("nodes" -> Json.obj(
+                    "type" -> "SingleNode",
+                    "nodes" -> n,
+                    "instances" -> 1))
+                case None => Json.obj()
+            }))),
+        "processors" -> processors)
 
-        // Send a message to our Dispatcher to create the (remote) actor and return us the ActorRef
-        try {
-            val fut = Akka.system.actorSelection("user/TuktuDispatcher") ? {
-                new controllers.DispatchRequest(nextName, Some(customConfig), false, true, sync, None)
-            }
-            fut.onSuccess {
-                case ar: ActorRef => forwarder ! (ar, sync)
-            }
-        } catch {
-            case e: TimeoutException     => {} // skip
-            case e: NullPointerException => {}
+    // Send a message to our Dispatcher to create the (remote) actor and return us the ActorRef
+    try {
+        val fut = Akka.system.actorSelection("user/TuktuDispatcher") ? {
+            new controllers.DispatchRequest(nextName, Some(customConfig), false, true, sync, None)
         }
+        fut.onSuccess {
+            case ar: ActorRef => forwarder ! (ar, sync)
+        }
+    } catch {
+        case e: TimeoutException     => {} // skip
+        case e: NullPointerException => {}
     }
 
-    override def processor(): Enumeratee[DataPacket, DataPacket] = Enumeratee.mapM((data: DataPacket) => Future {
+    override def process: Enumeratee[DataPacket, DataPacket] = Enumeratee.mapM(data => Future {
         // Send the result to the generator
         val newData = sync match {
             case true => {
@@ -211,38 +202,30 @@ class GeneratorStreamProcessor(resultName: String) extends BaseProcessor(resultN
 /**
  * Invokes a new generator
  */
-class GeneratorConfigStreamProcessor(resultName: String) extends BaseProcessor(resultName) {
+class GeneratorConfigStreamProcessor(config: JsObject) extends BaseProcessor(config) {
     implicit val timeout = Timeout(Cache.getAs[Int]("timeout").getOrElse(5) seconds)
 
-    var name: String = _
-    var nodes: JsObject = _
-    var next: List[String] = _
-    var flowPresent = true
-    var flowField: String = _
-
-    override def initialize(config: JsObject) {
-        // Get the name of the config file
-        name = (config \ "name").as[String]
-        // Node to execute on
-        nodes = (config \ "nodes").asOpt[String] match {
-            case Some(n) => Json.obj("nodes" -> Json.obj(
-                "type" -> "SingleNode",
-                "node" -> n,
-                "instances" -> 1))
-            case None => Json.obj()
-        }
-        // Get the processors to send data into
-        next = (config \ "next").as[List[String]]
-
-        // Check if the flow of processors if given or in an external JSON
-        flowPresent = (config \ "flow_given").asOpt[Boolean].getOrElse(true)
-
-        // The field of the JSON to load
-        flowField = (config \ "flow_field").as[String]
+    // Get the name of the config file
+    val name = (config \ "name").as[String]
+    // Node to execute on
+    val nodes = (config \ "nodes").asOpt[String] match {
+        case Some(n) => Json.obj("nodes" -> Json.obj(
+            "type" -> "SingleNode",
+            "node" -> n,
+            "instances" -> 1))
+        case None => Json.obj()
     }
+    // Get the processors to send data into
+    val next = (config \ "next").as[List[String]]
 
-    override def processor(): Enumeratee[DataPacket, DataPacket] = Enumeratee.mapM((data: DataPacket) => Future {
-        for (datum <- data.data) {
+    // Check if the flow of processors if given or in an external JSON
+    val flowPresent = (config \ "flow_given").asOpt[Boolean].getOrElse(true)
+
+    // The field of the JSON to load
+    val flowField = (config \ "flow_field").as[String]
+
+    override def process: Enumeratee[DataPacket, DataPacket] = Enumeratee.mapM(data => Future {
+        data.foreach(datum => {
             val processors = {
                 val configFile = scala.io.Source.fromFile(Cache.getAs[String]("configRepo").getOrElse("configs") +
                     "/" + utils.evaluateTuktuString(flowField, datum) + ".json", "utf-8")
@@ -270,7 +253,7 @@ class GeneratorConfigStreamProcessor(resultName: String) extends BaseProcessor(r
                     generatorActor ! new StopPacket
                 }
             }
-        }
+        })
 
         data
     })
@@ -316,54 +299,45 @@ class ParallelProcessorActor(processor: Enumeratee[DataPacket, DataPacket]) exte
 /**
  * Executes a number of processor-flows in parallel
  */
-class ParallelProcessor(resultName: String) extends BaseProcessor(resultName) {
+class ParallelProcessor(config: JsObject) extends BaseProcessor(config) {
     implicit val timeout = Timeout(Cache.getAs[Int]("timeout").getOrElse(5) seconds)
 
-    var actors: List[ActorRef] = null
-    var merger: Method = null
-    var mergerClass: Any = null
+    val pipelines = (config \ "processors").as[List[JsObject]]
 
-    override def initialize(config: JsObject) {
-        // Process config
-        val pipelines = (config \ "processors").as[List[JsObject]]
+    // Set up the merger
+    val mergerProcClazz = Class.forName((config \ "merger").as[String])
+    val mergerClass = mergerProcClazz.getConstructor().newInstance()
+    val merger = mergerProcClazz.getMethods.filter(m => m.getName == "merge").head
 
-        // Set up the merger
-        val mergerProcClazz = Class.forName((config \ "merger").as[String])
-        mergerClass = mergerProcClazz.getConstructor().newInstance()
-        merger = mergerProcClazz.getMethods.filter(m => m.getName == "merge").head
+    // For each pipeline, build the enumeratee
+    val actors = for (pipeline <- pipelines) yield {
+        val start = (pipeline \ "start").as[String]
+        val procs = (pipeline \ "pipeline").as[List[JsObject]]
+        val processorMap = (for (processor <- procs) yield {
+            // Get all fields
+            val processorId = (processor \ "id").as[String]
+            val processorName = (processor \ "name").as[String]
+            val processorConfig = (processor \ "config").as[JsObject]
+            val next = (processor \ "next").as[List[String]]
 
-        // For each pipeline, build the enumeratee
-        actors = for (pipeline <- pipelines) yield {
-            val start = (pipeline \ "start").as[String]
-            val procs = (pipeline \ "pipeline").as[List[JsObject]]
-            val processorMap = (for (processor <- procs) yield {
-                // Get all fields
-                val processorId = (processor \ "id").as[String]
-                val processorName = (processor \ "name").as[String]
-                val processorConfig = (processor \ "config").as[JsObject]
-                val resultName = (processor \ "result").as[String]
-                val next = (processor \ "next").as[List[String]]
+            // Create processor definition
+            val procDef = new ProcessorDefinition(
+                processorId,
+                processorName,
+                processorConfig,
+                next)
 
-                // Create processor definition
-                val procDef = new ProcessorDefinition(
-                    processorId,
-                    processorName,
-                    processorConfig,
-                    resultName,
-                    next)
+            // Return map
+            processorId -> procDef
+        }).toMap
 
-                // Return map
-                processorId -> procDef
-            }).toMap
-
-            // Build the processor pipeline for this generator
-            val processor = controllers.Dispatcher.buildEnums(List(start), processorMap, "ParalllelProcessor", None).head
-            // Set up the actor that will execute this processor
-            Akka.system.actorOf(Props(classOf[ParallelProcessorActor], processor))
-        }
+        // Build the processor pipeline for this generator
+        val processor = controllers.Dispatcher.buildEnums(List(start), processorMap, "ParalllelProcessor", None).head
+        // Set up the actor that will execute this processor
+        Akka.system.actorOf(Props(classOf[ParallelProcessorActor], processor))
     }
 
-    override def processor(): Enumeratee[DataPacket, DataPacket] = Enumeratee.map(data => {
+    override def process: Enumeratee[DataPacket, DataPacket] = Enumeratee.map(data => {
         // Send data to actors
         val futs = for (actor <- actors) yield (actor ? data).asInstanceOf[Future[DataPacket]]
 

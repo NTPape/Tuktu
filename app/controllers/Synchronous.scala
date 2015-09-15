@@ -12,6 +12,7 @@ import play.api.libs.json.JsObject
 import play.api.mvc.Action
 import play.api.mvc.Controller
 import tuktu.api.DataPacket
+import tuktu.api.Datum
 import scala.concurrent.Await
 import scala.concurrent.duration.Duration
 import play.api.libs.concurrent.Akka
@@ -50,12 +51,12 @@ object Synchronous extends Controller {
             ).asInstanceOf[ActorRef]
             
             // Forward data to generator and fetch result
-            val resultFuture = (generator ? new DataPacket(List(utils.JsObjectToMap((jsonBody \ "body").as[JsObject])))).asInstanceOf[Future[DataPacket]]
+            val resultFuture = (generator ? new DataPacket(List(new Datum(utils.JsObjectToMap((jsonBody \ "body").as[JsObject]))))).asInstanceOf[Future[DataPacket]]
             val timeoutFuture = Promise.timeout(TimeoutPacket, customTimeout)
             Future.firstCompletedOf(Seq(resultFuture, timeoutFuture)).map {
                 case dp: DataPacket => {
                     // Only makes sense if we get one result
-                    val packet = dp.data.head
+                    val packet = dp.head
                     
                     // Read the responding field
                     val fieldName = (jsonBody \ "field").as[String]

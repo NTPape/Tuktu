@@ -7,49 +7,42 @@ import scala.concurrent.ExecutionContext.Implicits.global
 import scala.concurrent.Future
 import play.api.libs.iteratee.Enumeratee
 import play.api.libs.json.JsObject
-import tuktu.api.BaseProcessor
-import tuktu.api.DataPacket
-import tuktu.api.utils
+import tuktu.api._
 import scala.io.Codec
 import scala.io.Source
 
 /**
  * Streams data into a file and closes it when it's done
  */
-class FileStreamProcessor(resultName: String) extends BaseProcessor(resultName) {
-    var writer: BufferedWriter = null
-    var fields = List[String]()
-    var fieldSep: String = null
-    var lineSep: String = null
+class FileStreamProcessor(config: JsObject) extends BaseProcessor(config) {
+    // Get the location of the file to write to
+    val fileName = (config \ "file_name").as[String]
+    val encoding = (config \ "encoding").asOpt[String].getOrElse("utf-8")
 
-    override def initialize(config: JsObject) {
-        // Get the location of the file to write to
-        val fileName = (config \ "file_name").as[String]
-        val encoding = (config \ "encoding").asOpt[String].getOrElse("utf-8")
+    // Get the field we need to write out
+    val fields = (config \ "fields").as[List[String]]
+    val fieldSep = (config \ "field_separator").asOpt[String].getOrElse(",")
+    val lineSep = (config \ "line_separator").asOpt[String] // .getOrElse newLine; see processDatum
 
-        // Get the field we need to write out
-        fields = (config \ "fields").as[List[String]]
-        fieldSep = (config \ "field_separator").asOpt[String].getOrElse(",")
-        lineSep = (config \ "line_separator").asOpt[String].getOrElse("\r\n")
+    val writer = new BufferedWriter(new OutputStreamWriter(new FileOutputStream(fileName), encoding))
 
-        writer = new BufferedWriter(new OutputStreamWriter(new FileOutputStream(fileName), encoding))
+    override def processDatum(datum: Datum, any: Any): Datum = {
+        // Write it
+        val output = (for (field <- fields if datum.contains(field)) yield datum(field).toString).mkString(fieldSep)
+
+        writer.write(output + lineSep)
+        lineSep match {
+            case Some(s) => writer.write(s)
+            case None    => writer.newLine
+        }
+
+        datum
     }
 
-    override def processor(): Enumeratee[DataPacket, DataPacket] = Enumeratee.mapM((data: DataPacket) => {
-        Future {
-            new DataPacket(for (datum <- data.data) yield {
-                // Write it
-                val output = (for (field <- fields if datum.contains(field)) yield datum(field).toString).mkString(fieldSep)
-
-                writer.write(output + lineSep)
-
-                datum
-            })
-        }
-    }) compose Enumeratee.onEOF(() => {
+    compositions.prepend(Enumeratee.onEOF(() => {
         writer.flush
         writer.close
-    })
+    }))
 }
 
 /**

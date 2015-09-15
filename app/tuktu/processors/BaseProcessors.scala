@@ -18,571 +18,325 @@ import play.api.libs.json._
 import play.api.libs.json.Json.toJsFieldJsValueWrapper
 import tuktu.api._
 import java.text.SimpleDateFormat
-import tuktu.nosql.util.stringHandler
 import tuktu.api.utils.evaluateTuktuString
+import scala.collection.mutable.ListBuffer
+import scala.collection.GenTraversableOnce
+import scala.collection.GenTraversable
 
 /**
- * Filters specific fields from the data tuple
+ * Renames a field
  */
-class FieldFilterProcessor(resultName: String) extends BaseProcessor(resultName) {
-    var fieldList = List[JsObject]()
-    
-    override def initialize(config: JsObject) {
-        // Find out which fields we should extract
-        fieldList = (config \ "fields").as[List[JsObject]]
-    }
-    
-    override def processor(): Enumeratee[DataPacket, DataPacket] = Enumeratee.mapM(data => {
-        Future {new DataPacket(for (datum <- data.data) yield {
-            (for {
-                    fieldItem <- fieldList
-                    default = (fieldItem \ "default").asOpt[JsValue]
-                    fields = (fieldItem \ "path").as[List[String]]
-                    fieldName = (fieldItem \ "result").as[String]
-                    field = fields.head
-                    if (fields.size > 0 && datum.contains(field))
-            } yield {
-                fieldName -> utils.fieldParser(datum, fields, default)
-            }).toMap
-        })}
-    })
+class FieldRenameProcessor(config: JsObject) extends BaseProcessor(config) {
+    override def processDatum(datum: Datum, any: Any): Datum =
+        datum - source_path + (result_path -> any)
+}
+
+/**
+ * Filters a field
+ */
+class FieldFilterProcessor(config: JsObject) extends BaseProcessor(config) {
+    override def processDatum(datum: Datum, any: Any): Datum =
+        new Datum() + (result_path -> any)
+}
+
+/**
+ * Removes a field
+ */
+class FieldRemoveProcessor(config: JsObject) extends BaseProcessor(config) {
+    override def processDatum(datum: Datum, any: Any): Datum =
+        datum - source_path
 }
 
 /**
  * Adds a running count integer to data coming in
  */
-class RunningCountProcessor(resultName: String) extends BaseProcessor(resultName) {
-    var cnt = 0
-    var perBlock = false
-    var stepSize = 1
-    
-    override def initialize(config: JsObject) {
-        cnt = (config \ "start_at").asOpt[Int].getOrElse(0)
-        perBlock = (config \ "per_block").asOpt[Boolean].getOrElse(false)
-        stepSize = (config \ "step_size").asOpt[Int].getOrElse(1)
-    }
-    
-    override def processor(): Enumeratee[DataPacket, DataPacket] = Enumeratee.mapM(data => Future {
+class RunningCountProcessor(config: JsObject) extends BaseProcessor(config) {
+    var cnt = (config \ "start_at").asOpt[Int].getOrElse(0)
+    val perBlock = (config \ "per_block").asOpt[Boolean].getOrElse(false)
+    val stepSize = (config \ "step_size").asOpt[Int].getOrElse(1)
+
+    override def processDataPacket(data: DataPacket): DataPacket = {
         if (perBlock) {
-            val res = new DataPacket(data.data.map(datum => datum + (resultName -> cnt)))
+            // Update counter for each DataPacket
+            val res = data.map(datum => datum + (result_path -> cnt))
             cnt += stepSize
             res
-        }
-        else {
-            new DataPacket(data.data.map(datum => {
-                val r = datum + (resultName -> cnt)
+        } else {
+            data.map(datum => {
+                // Update counter for each Datum
+                val r = datum + (result_path -> cnt)
                 cnt += stepSize
                 r
-            }))
+            })
         }
-    })
+    }
 }
 
 /**
  * Replaces one string for another (could be regex)
  */
-class ReplaceProcessor(resultName: String) extends BaseProcessor(resultName) {
-    var field = ""
-    var sources = List[String]()
-    var targets = List[String]()
-    
-    def replaceHelper(accum: String, offset: Int): String = {
-        if (offset >= sources.size) accum
-        else {
-            // Replace in the accumulator and advance
-            replaceHelper(accum.replaceAll(sources(offset), targets(offset)), offset + 1)
+class StringReplaceProcessor(config: JsObject) extends BaseProcessor(config) {
+    val replacements = (config \ "replacements").as[List[JsObject]]
+
+    def replaceHelper(accum: String, replacements: List[JsObject]): String = {
+        replacements match {
+            case Nil => accum
+            case head :: tail =>
+                replaceHelper(accum.replaceAll((head \ "source").as[String], (head \ "target").as[String]), tail)
         }
     }
-    
-    override def initialize(config: JsObject) {
-        field = (config \ "field").as[String]
-        sources = (config \ "sources").as[List[String]]
-        targets = (config \ "targets").as[List[String]]
-    }
-    
-    override def processor(): Enumeratee[DataPacket, DataPacket] = Enumeratee.mapM(data => Future {
-        new DataPacket(data.data.map(datum => datum + (field -> {
-            // Get field value to replace
-            val value = datum(field).toString
-            
-            // Replace
-            replaceHelper(value, 0)
-        })))
-    })
-}
 
-/**
- * Gets a JSON Object and fetches a single field to put it as top-level citizen of the data
- */
-class JsonFetcherProcessor(resultName: String) extends BaseProcessor(resultName) {
-    var fieldList = List[JsObject]()
-    
-    override def initialize(config: JsObject) {
-        // Find out which fields we should extract
-        fieldList = (config \ "fields").as[List[JsObject]]
-    }
-    
-    override def processor(): Enumeratee[DataPacket, DataPacket] = Enumeratee.mapM(data => {
-        Future {new DataPacket(for (datum <- data.data) yield {
-            val newData = (for {
-                    fieldItem <- fieldList
-                    default = (fieldItem \ "default").asOpt[JsValue]
-                    fields = (fieldItem \ "path").as[List[String]]
-                    fieldName = (fieldItem \ "result").as[String]
-                    field = fields.head
-                    if (fields.size > 0 && datum.contains(field))
-            } yield {
-                fieldName -> utils.fieldParser(datum, fields, default)
-            }).toMap
-            
-            datum ++ newData
-        })}
-    })
-}
-
-/**
- * Renames a single field
- */
-class FieldRenameProcessor(resultName: String) extends BaseProcessor(resultName) {
-    var fieldList = List[JsObject]()
-    
-    override def initialize(config: JsObject) {
-        fieldList = (config \ "fields").as[List[JsObject]]
-    }
-    
-    override def processor(): Enumeratee[DataPacket, DataPacket] = Enumeratee.mapM(data => {
-        Future {new DataPacket(for (datum <- data.data) yield {
-	        var mutableDatum = collection.mutable.Map(datum.toSeq: _*) 
-	        for {
-	                field <- fieldList
-                    
-                    fields = (field \ "path").as[List[String]]
-                    fieldName = (field \ "result").as[String]
-                    f = fields.head
-                    if (f.size > 0 && datum.contains(f))
-	        } {
-                val newValue = fieldName -> utils.fieldParser(datum, fields, null)
-
-	            // Replace
-	            mutableDatum = mutableDatum - f + newValue
-	        }
-	        
-	        mutableDatum.toMap
-        })}
-    })
+    override def processAny(any: Any): Any = replaceHelper(any.toString, replacements)
 }
 
 /**
  * Includes or excludes specific datapackets
  */
-class InclusionProcessor(resultName: String) extends BaseProcessor(resultName) {
-    var expression: String = null
-    var expressionType: String = null
-    var andOr: String = null
-    
-    override def initialize(config: JsObject) {
-        // Get the groovy expression that determines whether to include or exclude
-        expression = (config \ "expression").as[String]
-        // See if this is a simple or groovy expression
-        expressionType = (config \ "type").as[String]
-        // Set and/or
-        andOr = (config \ "and_or").asOpt[String] match {
-            case Some("or") => "or"
-            case _ => "and"
-        }
+class InclusionProcessor(config: JsObject) extends BaseProcessor(config) {
+    // Get the groovy expression that determines whether to include or exclude
+    val expression = (config \ "expression").as[String]
+    // See if this is a simple or groovy expression
+    val expressionType = (config \ "type").as[String]
+    // Set and/or
+    val andOr = (config \ "and_or").asOpt[String] match {
+        case Some("or") => "or"
+        case _          => "and"
     }
-    
-    override def processor(): Enumeratee[DataPacket, DataPacket] = Enumeratee.mapM((data: DataPacket) => {
-        Future {new DataPacket(for {
-                datum <- data.data
-                // See if we need to include this
-                include = expressionType match {
-                    case "groovy" => {
-                        // Replace expression with values
-                    	val replacedExpression = evaluateTuktuString(expression, datum)
-                    	
-	                    try {
-	                        Eval.me(replacedExpression).asInstanceOf[Boolean]
-	                    } catch {
-	                        case _: Throwable => true
-	                    }
-                    }
-                    case "negate" => {
-                        // This is a comma-separated list of field=val statements
-                        val matches = expression.split(",").map(m => m.trim)
-                        val evals = for (m <- matches) yield {
-                            val split = m.split("=").map(s => s.trim)
-                            // Get field and value and see if they match
-                            datum(split(0)) == split(1)
-                        }
-                        // See if its and/or
-                        if (andOr == "or") !evals.exists(elem => elem)
-                        else evals.exists(elem => !elem)
-                    }
-                    case _ => {
-                        // This is a comma-separated list of field=val statements
-                        val matches = expression.split(",").map(m => m.trim)
-                        val evals = (for (m <- matches) yield {
-                            val split = m.split("=").map(s => s.trim)
-                            // Get field and value and see if they match
-                            datum(evaluateTuktuString(split(0),datum)) == evaluateTuktuString(split(1),datum)
-                        }).toList
-                        // See if its and/or
-                        if (andOr == "or") evals.exists(elem => elem)
-                        else !evals.exists{elem => !elem}
+
+    override def processDataPacket(data: DataPacket): DataPacket = {
+        data.filter(datum =>
+            // See if we need to include this
+            expressionType match {
+                case "groovy" => {
+                    // Replace expression with values
+                    val replacedExpression = evaluateTuktuString(expression, datum)
+
+                    try {
+                        Eval.me(replacedExpression).asInstanceOf[Boolean]
+                    } catch {
+                        case _: Throwable => true
                     }
                 }
-                if (include)
-        } yield {
-            datum
-        })}
-    }) compose Enumeratee.filter((data: DataPacket) => {
-        data.data.size > 0
-    })
+                case "negate" => {
+                    // This is a comma-separated list of field=val statements
+                    val matches = expression.split(",").map(m => m.trim)
+                    val evals = for (m <- matches) yield {
+                        val split = m.split("=").map(s => s.trim)
+                        // Get field and value and see if they match
+                        datum(split(0)) == split(1)
+                    }
+                    // See if its and/or
+                    if (andOr == "or") !evals.exists(elem => elem)
+                    else evals.exists(elem => !elem)
+                }
+                case _ => {
+                    // This is a comma-separated list of field=val statements
+                    val matches = expression.split(",").map(m => m.trim)
+                    val evals = (for (m <- matches) yield {
+                        val split = m.split("=").map(s => s.trim)
+                        // Get field and value and see if they match
+                        datum(evaluateTuktuString(split(0), datum)) == evaluateTuktuString(split(1), datum)
+                    }).toList
+                    // See if its and/or
+                    if (andOr == "or") evals.exists(elem => elem)
+                    else !evals.exists(elem => !elem)
+                }
+            })
+    }
 }
 
 /**
- * Adds a field with a constant (static) value
+ * Adds a field with a constant (static) String / Long value
  */
-class FieldConstantAdderProcessor(resultName: String) extends BaseProcessor(resultName) {
-    var value = ""
-    var isNumeric = false
-    
-    override def initialize(config: JsObject) {
-        value = (config \ "value").as[String]
-        isNumeric = (config \ "is_numeric").asOpt[Boolean].getOrElse(false)
-    }
-    
-    override def processor(): Enumeratee[DataPacket, DataPacket] = Enumeratee.mapM(data => {
-        Future {new DataPacket(for (datum <- data.data) yield {
-            if(!isNumeric)
-	            datum + (resultName -> evaluateTuktuString(value, datum))
-            else
-                datum + (resultName -> evaluateTuktuString(value, datum).toLong)
-        })}
-    })
+class FieldConstantAdderProcessor(config: JsObject) extends BaseProcessor(config) {
+    val value = (config \ "value").as[String]
+    val isNumeric = (config \ "is_numeric").asOpt[Boolean].getOrElse(false)
+
+    override def processDatum(datum: Datum, any: Any): Datum =
+        if (!isNumeric)
+            datum + (result_path -> evaluateTuktuString(value, datum))
+        else
+            datum + (result_path -> evaluateTuktuString(value, datum).toLong)
 }
 
 /**
  * Dumps the data to console
  */
-class ConsoleWriterProcessor(resultName: String) extends BaseProcessor(resultName) {
-    var prettify = false
-    
-    override def initialize(config: JsObject) {
-        prettify = (config \ "prettify").asOpt[Boolean].getOrElse(false)
-    }    
-    
-    override def processor(): Enumeratee[DataPacket, DataPacket] = Enumeratee.mapM(data => Future {
-        if(prettify) data.data.foreach(datum => println(Json.prettyPrint(utils.anyMapToJson(datum))))         
-        else println(data + "\r\n")
+class ConsoleWriterProcessor(config: JsObject) extends BaseProcessor(config) {
+    // Turn Data to JSON and prettyPrint that, or just print Scala's standard toString of DataPacket
+    val prettify = (config \ "prettify").asOpt[Boolean].getOrElse(false)
+
+    override def processDataPacket(data: DataPacket): DataPacket = {
+        if (prettify)
+            data.foreach(datum => println(datum.prettyPrint))
+        else {
+            println(data)
+            println
+        }
 
         data
-    })
+    }
 }
 
 /**
  * Implodes an array of strings into a string
  */
-class ImploderProcessor(resultName: String) extends BaseProcessor(resultName) {
-    var fieldList = List[JsObject]()
-    override def initialize(config: JsObject) {
-        fieldList = (config \ "fields").as[List[JsObject]]
+class ImploderProcessor(config: JsObject) extends BaseProcessor(config) {
+    val separator = (config \ "separator").as[String]
+
+    override def processAny(any: Any): Any = {
+        val trav =
+            if (any.isInstanceOf[JsValue])
+                any.asInstanceOf[JsValue].as[TraversableOnce[String]]
+            else
+                any.asInstanceOf[TraversableOnce[String]]
+        trav.mkString(separator)
     }
-    
-    override def processor(): Enumeratee[DataPacket, DataPacket] = Enumeratee.mapM(data => {
-        Future {new DataPacket(for (datum <- data.data) yield {
-            // Find out which fields we should extract
-	        datum ++ (for (fieldObject <- fieldList) yield {
-	            // Get fields and separator
-	            val fields = (fieldObject \ "path").as[List[String]]
-	            val sep = (fieldObject \ "separator").as[String]
-	            // Get the array of strings
-	            val value = {
-                    val someVal = utils.fieldParser(datum, fields, None)
-                    if (someVal.isInstanceOf[JsValue])
-                        someVal.asInstanceOf[JsValue].as[Traversable[String]]
-                    else
-                        someVal.asInstanceOf[Traversable[String]]
-	            }
-                // Overwrite top-level field
-	            fields.head -> value.mkString(sep)
-	        })
-        })}
-    })
 }
 
 /**
- * Implodes an array of JSON object-fields that contain strings at a subpath into a string
+ * Implodes arrays of maps that contain strings at a subpath into a string
  */
-class JsObjectImploderProcessor(resultName: String) extends BaseProcessor(resultName) {
-    var fieldList = List[JsObject]()
-    
-    override def initialize(config: JsObject) {
-        fieldList = (config \ "fields").as[List[JsObject]]
+class MapImploderProcessor(config: JsObject) extends BaseProcessor(config) {
+    val separator = (config \ "separator").as[String]
+    val sub_path = (config \ "sub_path").as[List[String]]
+
+    override def processAny(any: Any): Any = {
+        if (any.isInstanceOf[JsValue]) {
+            any.asInstanceOf[JsValue].as[TraversableOnce[JsObject]].map(v => {
+                utils.getPathValue(v, sub_path) match {
+                    case None      => None.toString
+                    case Some(str) => str.as[JsString].value
+                }
+            }).mkString(separator)
+        } else {
+            try {
+                any.asInstanceOf[TraversableOnce[Map[String, Any]]].map(v => {
+                    utils.getPathValue(v, sub_path) match {
+                        case None      => None.toString
+                        case Some(str) => str.toString
+                    }
+                }).mkString(separator)
+            } catch {
+                case e: ClassCastException => Nil.mkString(separator)
+            }
+        }
     }
-    
-    override def processor(): Enumeratee[DataPacket, DataPacket] = Enumeratee.mapM(data => {
-        Future {new DataPacket(for (datum <- data.data) yield {
-            // Find out which fields we should extract
-	        datum ++ (for (fieldObject <- fieldList) yield {
-	            // Get fields
-	            val fields = (fieldObject \ "path").as[List[String]]
-	            val subpath = (fieldObject \ "subpath").as[List[String]]
-	            val sep = (fieldObject \ "separator").as[String]
-	            // Get the actual value
-	            val values = {
-                    val arr = utils.fieldParser(datum, fields, None)
-                    if (arr.isInstanceOf[JsValue])
-                        arr.asInstanceOf[JsValue].as[Traversable[JsObject]]
-                    else
-                        Nil
-	            }
-	            // Now iterate over the objects
-	            val gluedValue = values.map(value => {
-	                utils.jsonParser(value, subpath, None).as[JsString].value
-	            }).mkString(sep)
-	            // Replace top-level field
-	            fields.head -> gluedValue
-	        })
-        })}
-    })
 }
 
 /**
  * Flattens a map object
  */
-class FlattenerProcessor(resultName: String) extends BaseProcessor(resultName) {
-    def recursiveFlattener(mapping: Map[String, Any], currentKey: String, sep: String): Map[String, Any] = {
-        // Get the values of the map
-        (for ((key, value) <- mapping) yield {
+class FlattenerProcessor(config: JsObject) extends BaseProcessor(config) {
+    // Get the field to flatten and the separator
+    val separator = (config \ "separator").as[String]
 
+    def recursiveFlattener(map: Map[String, Any], keys: List[String]): Map[String, Any] = {
+        // Get the values of the map
+        (for ((key, value) <- map) yield {
             if (value.isInstanceOf[Map[String, Any]])
                 // Get the sub fields recursively
-                recursiveFlattener(value.asInstanceOf[Map[String, Any]], currentKey + sep + key, sep)
+                recursiveFlattener(value.asInstanceOf[Map[String, Any]], key :: keys)
             else
-                Map(currentKey + sep + key -> value)
-
+                Map((key :: keys).reverse.mkString(separator) -> value)
         }).foldLeft(Map[String, Any]())(_ ++ _)
     }
-    
-    var fieldList = List[String]()
-    var separator = ""
-    
-    override def initialize(config: JsObject) {
-        // Get the field to flatten
-        fieldList = (config \ "fields").as[List[String]]
-        separator = (config \ "separator").as[String]
+
+    override def processAny(any: Any): Any = {
+        val map = try {
+            any.asInstanceOf[Map[String, Any]]
+        } catch {
+            case e: ClassCastException => Map[String, Any]()
+        }
+        recursiveFlattener(map, source_path.takeRight(1))
     }
-    
-    override def processor(): Enumeratee[DataPacket, DataPacket] = Enumeratee.mapM(data => {
-        Future {new DataPacket(for (datum <- data.data) yield {
-            // Set up mutable datum
-            var mutableDatum = collection.mutable.Map(datum.toSeq: _*)
-            
-            // Find out which fields we should extract
-	        for (fieldName <- fieldList) {
-                // Remove the fields we need to extract
-                mutableDatum -= fieldName
-                
-	            // Get the value
-	            val value = {
-	                try {
-	                    recursiveFlattener(datum(fieldName).asInstanceOf[Map[String, Any]], fieldName, separator)
-	                } catch {
-	                    case e: Exception => {
-	                        e.printStackTrace()
-	                        Map[String, Any]()
-	                    }
-	                }
-	            }
-	            
-	            // Replace
-	            mutableDatum ++= value
-	        }
-	        mutableDatum.toMap
-        })}
-    })
 }
 
 /**
  * Takes a (JSON) sequence object and returns packets for each of the values in it
  */
-class SequenceExploderProcessor(resultName: String) extends BaseProcessor(resultName) {
-    var field = ""
-    var ignoreEmpty = true
-    
-    override def initialize(config: JsObject) {
-        field = (config \ "field").as[String]
-        ignoreEmpty = (config \ "ignore_empty").asOpt[Boolean].getOrElse(true)
+class SequenceExploderProcessor(config: JsObject) extends BaseProcessor(config) {
+    override def processDataPacket(data: DataPacket): DataPacket = {
+        data.flatMap(datum => datum(source_path) match {
+            case None => Nil
+            case Some(any) =>
+                if (any.isInstanceOf[Seq[Any]])
+                    for (value <- any.asInstanceOf[Seq[Any]]) yield datum + (result_path -> value)
+                else
+                    Nil
+        })
     }
-    
-    override def processor(): Enumeratee[DataPacket, DataPacket] = Enumeratee.mapM((data: DataPacket) => Future {
-        new DataPacket((for (datum <- data.data) yield {
-            // Get the field and explode it
-            val values = datum(field).asInstanceOf[Seq[Any]]
-            
-            for (value <- values) yield datum + (field -> value)
-        }).flatten)
-    }) compose Enumeratee.filterNot((data: DataPacket) => ignoreEmpty && data.data.isEmpty)
 }
 
 /**
  * Splits a string up into a list of values based on a separator
  */
-class StringSplitterProcessor(resultName: String) extends BaseProcessor(resultName) {
-    var field = ""
-    var separator = ""
-    var overwrite = false
-    
-    override def initialize(config: JsObject) {
-        field = (config \ "field").as[String]
-        separator = (config \ "separator").as[String]
-        overwrite = (config \ "overwrite").asOpt[Boolean].getOrElse(false)
-    }
-    
-    override def processor(): Enumeratee[DataPacket, DataPacket] = Enumeratee.mapM(data => Future {
-        new DataPacket(for (datum <- data.data) yield {
-            // Get the field and explode it
-            val values = datum(field).toString.split(separator).toList
-            
-            datum + {
-                if (overwrite) field -> values else resultName -> values
-            }
-        })
-    })
+class StringSplitterProcessor(config: JsObject) extends BaseProcessor(config) {
+    val separator = (config \ "separator").as[String]
+
+    override def processAny(any: Any): Any = any.toString.split(separator).toList
 }
 
 /**
  * Assumes the data is a List[Map[_]] and gets one specific field from the map to remain in the list
  */
-class ListMapFlattenerProcessor(resultName: String) extends BaseProcessor(resultName) {
-    var listField = ""
-    var mapField = ""
-    var ignoreEmpty = true
-    var overwrite = true
-    
-    override def initialize(config: JsObject) {
-        listField = (config \ "list_field").as[String]
-        mapField = (config \ "map_field").as[String]
-        ignoreEmpty = (config \ "ignore_empty").asOpt[Boolean].getOrElse(true)
-        overwrite = (config \ "overwrite").asOpt[Boolean].getOrElse(true)
+class ListMapFlattenerProcessor(config: JsObject) extends BaseProcessor(config) {
+    val mapField = (config \ "map_field").as[String]
+
+    override def processAny(any: Any): Any = {
+        try {
+            any.asInstanceOf[List[Map[String, Any]]].map(map => map(mapField))
+        } catch {
+            case e: ClassCastException => Nil
+        }
     }
-    
-    override def processor(): Enumeratee[DataPacket, DataPacket] = Enumeratee.mapM((data: DataPacket) => Future {
-        new DataPacket(for (datum <- data.data) yield {
-            // Get the list field's value
-            val listValue = datum(listField).asInstanceOf[List[Map[String, Any]]]
-            
-            // Get the actual fields of the maps iteratively
-            val newList = listValue.map(listItem => {
-                // Get map field
-                listItem(mapField)
-            })
-            
-            // Return new list rather than old
-            if (overwrite)
-                datum + (listField -> newList)
-            else
-                datum + (resultName -> newList)
-        })
-    }) compose Enumeratee.filter((data: DataPacket) => {if (ignoreEmpty) !data.data.isEmpty else true})
 }
 
 /**
  * Assumes the data is a List[Map[_]] and gets specific fields from the map to remain in the list
  */
-class MultiListMapFlattenerProcessor(resultName: String) extends BaseProcessor(resultName) {
-    var listField = ""
-    var mapFields: List[String] = _
-    var ignoreEmpty = true
-    var overwrite = true
-    
-    override def initialize(config: JsObject) {
-        listField = (config \ "list_field").as[String]
-        mapFields = (config \ "map_fields").as[List[String]]
-        ignoreEmpty = (config \ "ignore_empty").asOpt[Boolean].getOrElse(true)
+class MultiListMapFlattenerProcessor(config: JsObject) extends BaseProcessor(config) {
+    val mapFields = (config \ "map_fields").as[List[String]]
+
+    override def processDatum(datum: Datum, any: Any): Datum = {
+        val listValue = any.asInstanceOf[List[Map[String, Any]]]
+
+        // Keep map of results
+        val resultMap = collection.mutable.Map[String, ListBuffer[Any]]().withDefaultValue(ListBuffer[Any]())
+
+        // Get the actual fields of the maps iteratively
+        for (listItem <- listValue; field <- mapFields)
+            resultMap(field) += listItem(field)
+
+        // Add to our total result
+        datum ++ resultMap.map(elem => (result_path ++ List(elem._1)) -> elem._2.toList).toList
     }
-    
-    override def processor(): Enumeratee[DataPacket, DataPacket] = Enumeratee.mapM((data: DataPacket) => Future {
-        new DataPacket(for (datum <- data.data) yield {
-            // Get the list field's value
-            val listValue = datum(listField).asInstanceOf[List[Map[String, Any]]]
-            
-            // Keep map of results
-            val resultMap = collection.mutable.Map[String, collection.mutable.ListBuffer[Any]]()
-            
-            // Get the actual fields of the maps iteratively
-            listValue.map(listItem => {
-                mapFields.foreach(field => {
-                    // Add to our resultMap
-                    if (!resultMap.contains(field))
-                        resultMap += field -> collection.mutable.ListBuffer[Any]()
-                    
-                    resultMap(field) += listItem(field)
-                })
-            })
-            
-            // Add to our total result
-            datum -- mapFields ++ resultMap.map(elem => elem._1 -> elem._2.toList)
-        })
-    }) compose Enumeratee.filter((data: DataPacket) => {if (ignoreEmpty) !data.data.isEmpty else true})
 }
 
 /**
  * Verifies all fields are present before sending it on
  */
-class ContainsAllFilterProcessor(resultName: String) extends BaseProcessor(resultName) {
-    var fieldContainingList: String = _
-    var field: String = _
-    var containsField = ""
-    
-    override def initialize(config: JsObject) {
-        field = (config \ "field").as[String]
-        containsField = (config \ "contains_field").as[String]
-        fieldContainingList = (config \ "field_list").as[String]
-    }
-    
-    override def processor(): Enumeratee[DataPacket, DataPacket] = Enumeratee.mapM((data: DataPacket) => Future {
-        new DataPacket({
-            val resultMap = (for (datum <- data.data) yield {
-                // Build the actual set of contain-values
-                val containsSet = collection.mutable.Set[Any]() ++ datum(containsField).asInstanceOf[Seq[Any]]
-                
-                // Get our record
-                val record = datum(fieldContainingList).asInstanceOf[List[Map[String,Any]]]
-                
-                // Do the matching
-                for (rec <- record if !containsSet.isEmpty)
-                    containsSet -= rec(field)
-                 
-                if (containsSet.isEmpty) datum
-                else Map[String, Any]()
-            })
-            
-            val filteredMap = resultMap.filter(elem => !elem.isEmpty)
-            filteredMap
-        })
-    }) compose Enumeratee.filter((data: DataPacket) => !data.data.isEmpty)
-}
+class ContainsAllFilterProcessor(config: JsObject) extends BaseProcessor(config) {
+    val field = (config \ "field").as[String]
+    val containsField = (config \ "contains_field").as[String]
+    val fieldContainingList = (config \ "field_list").as[String]
 
-/**
- * Takes a Map[String, Any] and makes it a top-level citizen 
- */
-class MapFlattenerProcessor(resultName: String) extends BaseProcessor(resultName) {
-    var field = ""
-    
-    override def initialize(config: JsObject) {
-        field = (config \ "field").as[String]
-    }
-    
-    override def processor(): Enumeratee[DataPacket, DataPacket] = Enumeratee.mapM((data: DataPacket) => Future {
-        new DataPacket(for (datum <- data.data) yield {
-            // Get map
-            val map = datum(field).asInstanceOf[Map[String, Any]]
-            
-            // Add to total
-            datum ++ map
+    override def process: Enumeratee[DataPacket, DataPacket] = Enumeratee.mapM((data: DataPacket) => Future {
+        val resultMap = data.map({ datum =>
+            // Build the actual set of contain-values
+            val containsSet = collection.mutable.Set[Any]() ++ datum(containsField).asInstanceOf[Seq[Any]]
+
+            // Get our record
+            val record = datum(fieldContainingList).asInstanceOf[List[Map[String, Any]]]
+
+            // Do the matching
+            for (rec <- record if !containsSet.isEmpty)
+                containsSet -= rec(field)
+
+            if (containsSet.isEmpty) datum
+            else new Datum
         })
-    })
+
+        resultMap.filterNot(elem => elem.isEmpty)
+    }) compose Enumeratee.filterNot((data: DataPacket) => data.isEmpty)
 }

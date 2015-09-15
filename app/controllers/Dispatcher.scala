@@ -56,8 +56,8 @@ object Dispatcher {
         val monitorActor = Await.result(fut.mapTo[ActorIdentity], 2 seconds).getRef*/
         
         Enumeratee.mapM(data => Future {
-            if (data.data.size > 0)
-                Akka.system.actorSelection("user/TuktuMonitor") ! new MonitorPacket(mpType, generatorName, branch, data.data.size)
+            if (!data.isEmpty)
+                Akka.system.actorSelection("user/TuktuMonitor") ! new MonitorPacket(mpType, generatorName, branch, data.size)
             data
         })
     }
@@ -138,8 +138,7 @@ object Dispatcher {
                         classOf[ActorRef],
                         classOf[String]
                 ).newInstance(
-                        generator,
-                        pd.resultName
+                        generator
                 )
             
                 // Initialize the processor first
@@ -156,11 +155,7 @@ object Dispatcher {
             }
             else {
                 // 'Regular' processor
-                val iClazz = procClazz.getConstructor(classOf[String]).newInstance(pd.resultName)
-            
-                // Initialize the processor first
-                val initMethod = procClazz.getMethods.filter(m => m.getName == "initialize").head
-                initMethod.invoke(iClazz, pd.config)
+                val iClazz = procClazz.getConstructor(classOf[String])
                 
                 val method = procClazz.getMethods.filter(m => m.getName == "processor").head
                 val procEnum = method.invoke(iClazz).asInstanceOf[Enumeratee[DataPacket, DataPacket]]
@@ -265,7 +260,6 @@ class Dispatcher(monitorActor: ActorRef) extends Actor with ActorLogging {
             val processorId = (processor \ "id").as[String]
             val processorName = (processor \ "name").as[String]
             val processorConfig = (processor \ "config").as[JsObject]
-            val resultName = (processor \ "result").as[String]
             val next = (processor \ "next").as[List[String]]
             
             // Create processor definition
@@ -273,7 +267,6 @@ class Dispatcher(monitorActor: ActorRef) extends Actor with ActorLogging {
                     processorId,
                     processorName,
                     processorConfig,
-                    resultName,
                     next
             )
             

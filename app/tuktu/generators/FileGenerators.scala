@@ -68,7 +68,7 @@ class LineGenerator(resultName: String, processors: List[Enumeratee[DataPacket, 
         }
         case sp: StopPacket => cleanup
         case ip: InitPacket => setup
-        case line: String => channel.push(new DataPacket(List(Map(resultName -> line))))
+        case line: String => channel.push(new DataPacket(List(new Datum(Map(resultName -> line)))))
     }
 }
 
@@ -147,6 +147,6 @@ class FilesGenerator(resultName: String, processors: List[Enumeratee[DataPacket,
         }
         case sp: StopPacket => cleanup
         case ip: InitPacket => setup
-        case path: Path => channel.push(new DataPacket(List(Map(resultName -> path))))
+        case path: Path => channel.push(new DataPacket(List(new Datum(Map(resultName -> path)))))
     }
 }

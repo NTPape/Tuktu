@@ -1,76 +1,62 @@
 package tuktu.processors.arithmetics
 
-import scala.concurrent.ExecutionContext.Implicits.global
-import scala.concurrent.Future
-
-import play.api.libs.iteratee.Enumeratee
 import play.api.libs.json.JsObject
-import tuktu.api.BaseProcessor
-import tuktu.api.DataPacket
+import tuktu.api._
 
-class NumberToNumberProcessor(resultName: String) extends BaseProcessor(resultName) {
-    var targetType = ""
-    var field = ""
-    
-    override def initialize(config: JsObject) = {
-        targetType = (config \ "target_type").as[String]
-        field = (config \ "field").as[String]
-    }
+class NumberToNumberProcessor(config: JsObject) extends BaseProcessor(config: JsObject) {
+    val targetType = (config \ "target_type").as[String]
 
-    override def processor(): Enumeratee[DataPacket, DataPacket] = Enumeratee.mapM(data => Future {
-        // Convert the field from source to target
-        new DataPacket(for (datum <- data.data) yield datum + (resultName -> converter(datum(field))))
-    })
-    
+    override def processDatum(datum: Datum, any: Any): Datum = datum + (result_path -> convert(any))
+
     /**
      * Converts a field to the required target type
      */
-    private def converter(value: Any): Any = {
+    private def convert(value: Any): Any = {
         value match {
             case a: String => targetType match {
-                case "Long" => a.toLong
-                case "Double" => a.toDouble
-                case "Float" => a.toFloat
+                case "Long"       => a.toLong
+                case "Double"     => a.toDouble
+                case "Float"      => a.toFloat
                 case "BigDecimal" => BigDecimal(a)
-                case _ => a.toInt
+                case _            => a.toInt
             }
             case a: Int => targetType match {
-                case "Long" => a.toLong
-                case "Double" => a.toDouble
-                case "Float" => a.toFloat
+                case "Long"       => a.toLong
+                case "Double"     => a.toDouble
+                case "Float"      => a.toFloat
                 case "BigDecimal" => BigDecimal(a)
-                case _ => a.toInt
+                case _            => a.toInt
             }
             case a: Long => targetType match {
-                case "Long" => a.toLong
-                case "Double" => a.toDouble
-                case "Float" => a.toFloat
+                case "Long"       => a
+                case "Double"     => a.toDouble
+                case "Float"      => a.toFloat
                 case "BigDecimal" => BigDecimal(a)
-                case _ => a.toInt
+                case _            => a.toInt
             }
             case a: Double => targetType match {
-                case "Long" => a.toLong
-                case "Double" => a.toDouble
-                case "Float" => a.toFloat
+                case "Long"       => a.toLong
+                case "Double"     => a
+                case "Float"      => a.toFloat
                 case "BigDecimal" => BigDecimal(a)
-                case _ => a.toInt
+                case _            => a.toInt
             }
             case a: Float => targetType match {
-                case "Long" => a.toLong
-                case "Double" => a.toDouble
-                case "Float" => a.toFloat
+                case "Long"       => a.toLong
+                case "Double"     => a.toDouble
+                case "Float"      => a
                 case "BigDecimal" => BigDecimal(a.toDouble)
-                case _ => a.toInt
+                case _            => a.toInt
             }
             case a: BigDecimal => targetType match {
-                case "Long" => a.toLong
-                case "Double" => a.toDouble
-                case "Float" => a.toFloat
+                case "Long"       => a.toLong
+                case "Double"     => a.toDouble
+                case "Float"      => a.toFloat
                 case "BigDecimal" => a
-                case _ => a.toInt
+                case _            => a.toInt
             }
-            case a: Map[Any, Any] => a.map(elem => elem._1 -> converter(elem._2))
-            case a: Iterable[Any] => a.map(elem => converter(elem))
+            case a: Map[_, _]   => a.mapValues(v => convert(v))
+            case a: Iterable[_] => a.map(v => convert(v))
         }
     }
 }
